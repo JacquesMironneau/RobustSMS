@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sns"
@@ -31,6 +33,8 @@ var messages = messageQueue{
 		ID: "1", To: "0651392313", Message: "Salut !!monde!!",
 	},
 }
+
+var allowCloud = false
 
 // func main() {
 // 	msgPtr := flag.String("m", "", "The message to send to the subscribed users of the topic")
@@ -57,6 +61,12 @@ var messages = messageQueue{
 // 	c.mu.Unlock()
 // }
 
+func replaceAtIndex(in string, r rune, i int) string {
+	out := []rune(in)
+	out[i] = r
+	return string(out)
+}
+
 func createMessage(w http.ResponseWriter, r *http.Request) {
 	var newMessage message
 	reqBody, err := ioutil.ReadAll(r.Body)
@@ -74,12 +84,38 @@ func createMessage(w http.ResponseWriter, r *http.Request) {
 	// 	}
 	log.Print(newMessage)
 
-	message := newMessage.Message
-	phoneNumber := newMessage.To
-	sendCloudSMS(&message, &phoneNumber)
+	// localRegex, e := regexp.Compile('^(\+33|06|07)')
+	// internatioNalRegex, _ := regexp.Compile('^\+3\d')
+
+	num := newMessage.To
+	inat, _ := regexp.Match("^\\+3", []byte(num))
+	fr, _ := regexp.Match("^\\+33", []byte(num))
+	frToFormat, _ := regexp.Match("^(06|07)", []byte(num))
+
+	// France
+	if fr {
+		fmt.Println("Sending locally")
+	} else if frToFormat {
+		newMessage.To = "+33" + num[1:]
+		fmt.Println("Sending locally with formatting", num, newMessage.To)
+
+	} else if inat {
+		if allowCloud {
+			fmt.Println("Sending cloudly")
+
+		} else {
+			fmt.Println("Fake Sending cloudly")
+		}
+
+	} else {
+		fmt.Println("Wrong format")
+	}
+
+	// message := newMessage.Message
+	// phoneNumber := newMessage.To
+	// sendCloudSMS(&message, &phoneNumber)
 
 	w.WriteHeader(http.StatusCreated)
-
 	json.NewEncoder(w).Encode(newMessage)
 }
 
@@ -122,6 +158,7 @@ var svc = sns.New(sess)
 
 func main() {
 
+	fmt.Println(strings.HasPrefix("+34312", "+33"))
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/messages", createMessage).Methods("POST")
 	router.HandleFunc("/messages", getMessages).Methods("GET")
