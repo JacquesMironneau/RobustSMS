@@ -6,19 +6,26 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"regexp"
-	"strings"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/gorilla/mux"
+	"github.com/jacobsa/go-serial/serial"
 )
 
 // type SafeCounter struct {
 // 	mu sync.Mutex
 // 	v  map[string]int
 // }
+
+var options = serial.OpenOptions{
+	PortName:        "/dev/tty.usbserial-A8008HlV",
+	BaudRate:        19200,
+	DataBits:        8,
+	StopBits:        1,
+	MinimumReadSize: 4,
+}
 
 type message struct {
 	ID      string `json:"ID"`
@@ -36,36 +43,20 @@ var messages = messageQueue{
 
 var allowCloud = false
 
-// func main() {
-// 	msgPtr := flag.String("m", "", "The message to send to the subscribed users of the topic")
-// 	phoneNumberPtr := flag.String("n", "", "The ARN of the topic to which the user subscribes")
-
-// 	flag.Parse()
-
-// 	if *msgPtr == "" || *phoneNumberPtr == "" {
-// 		fmt.Println("You must supply a message and a phoneNumber (+33XXXXXXXX)")
-// 		fmt.Println("Usage: go run SnsPublish.go -m MESSAGE -n PhoneNumber")
-// 		os.Exit(1)
-// 	}
-
-// Initialize a session that the SDK will use to load
-// credentials from the shared credentials file. (~/.aws/credentials).
-
-//
-// }
-
-// func (c *SafeCounter) Inc(key string) {
-// 	c.mu.Lock()
-// 	// Lock so only one goroutine at a time can access the map c.v.
-// 	c.v[key]++
-// 	c.mu.Unlock()
-// }
-
-func replaceAtIndex(in string, r rune, i int) string {
-	out := []rune(in)
-	out[i] = r
-	return string(out)
+type SMSSender interface {
+	SendSMS(msgPtr *string, phoneNumberPtr *string) bool
 }
+
+type OnPremSMSSEnder struct {
+	options serial.OpenOptions
+}
+
+type AWS_SNS_Sender struct {
+	svc *sns.SNS
+}
+
+var LocalSMSSender = OnPremSMSSEnder{options}
+var CloudSMSSender = AWS_SNS_Sender{svc}
 
 func createMessage(w http.ResponseWriter, r *http.Request) {
 	var newMessage message
@@ -84,38 +75,36 @@ func createMessage(w http.ResponseWriter, r *http.Request) {
 	// 	}
 	log.Print(newMessage)
 
-	// localRegex, e := regexp.Compile('^(\+33|06|07)')
-	// internatioNalRegex, _ := regexp.Compile('^\+3\d')
-
 	num := newMessage.To
 	inat, _ := regexp.Match("^\\+3", []byte(num))
-	fr, _ := regexp.Match("^\\+33", []byte(num))
+
 	frToFormat, _ := regexp.Match("^(06|07)", []byte(num))
 
+	sent := false
 	// France
+
+	if frToFormat {
+		newMessage.To = "+33" + num[1:]
+		fmt.Println("Formatting", num, newMessage.To)
+	}
+
+	fr, _ := regexp.Match("^\\+33", []byte(num))
+
 	if fr {
 		fmt.Println("Sending locally")
-	} else if frToFormat {
-		newMessage.To = "+33" + num[1:]
-		fmt.Println("Sending locally with formatting", num, newMessage.To)
-
+		sent = sendLocalWithCloudFallback(&newMessage.Message, &newMessage.To)
 	} else if inat {
-		if allowCloud {
-			fmt.Println("Sending cloudly")
-
-		} else {
-			fmt.Println("Fake Sending cloudly")
-		}
-
+		sent = CloudSMSSender.sendSMS(&newMessage.Message, &newMessage.To)
 	} else {
 		fmt.Println("Wrong format")
 	}
 
-	// message := newMessage.Message
-	// phoneNumber := newMessage.To
-	// sendCloudSMS(&message, &phoneNumber)
-
-	w.WriteHeader(http.StatusCreated)
+	fmt.Println("Message sent", sent)
+	if sent {
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+	}
 	json.NewEncoder(w).Encode(newMessage)
 }
 
@@ -123,33 +112,69 @@ func getMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages)
 }
 func homeLink(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Welcome home!")
+	fmt.Fprintf(w, "Welcome on the RobustSMS API !")
 }
 
-func sendSMS() {
-	sendOnPremSMS()
-	// sendCloudSMS()
+func (sender OnPremSMSSEnder) sendSMS(msgPtr *string, phoneNumberPtr *string) bool {
+
+	// Open the port.
+	port, err := serial.Open(options)
+	if err != nil {
+		log.Fatalf("serial.Open: %v", err)
+	}
+
+	// Make sure to close it later.
+	defer port.Close()
+
+	// Write 4 bytes to the port.
+	number := []byte("AT+CMGS=" + *phoneNumberPtr + "\r")
+	n, err := port.Write(number)
+
+	if err != nil {
+		log.Fatalf("Failed to send on prem sms: %v", err)
+		return false
+	}
+	fmt.Println("Wrote", n, "bytes.")
+
+	message := []byte(*msgPtr + "\x1A")
+	n, err = port.Write(message)
+
+	if err != nil {
+		log.Fatalf("Failed to send on prem sms: %v", err)
+		return false
+	}
+	fmt.Println("Wrote", n, "bytes.")
+	return true
 }
 
-func sendOnPremSMS() {
-	// sm, err := NewStateMachine("")
-	// sm.Connect()
-	// sm.SendSMS(number, "Bonjour depuis l'application!")
-}
+func (sender AWS_SNS_Sender) sendSMS(msgPtr *string, phoneNumberPtr *string) bool {
 
-func sendCloudSMS(msgPtr *string, phoneNumberPtr *string) {
-	result, err := svc.Publish(&sns.PublishInput{
+	if !allowCloud {
+		fmt.Println("Fake sending cloudly")
+		return false
+	}
+	result, err := sender.svc.Publish(&sns.PublishInput{
 		Message:     msgPtr,
 		PhoneNumber: phoneNumberPtr,
 	})
 	if err != nil {
 		fmt.Println(err.Error())
-		os.Exit(1)
+		return false
 	}
-
 	fmt.Println(*result.MessageId)
+	return true
 }
 
+func sendLocalWithCloudFallback(msgPtr *string, phoneNumberPtr *string) bool {
+	sent := LocalSMSSender.sendSMS(msgPtr, phoneNumberPtr)
+	if !sent {
+		sent = CloudSMSSender.sendSMS(msgPtr, phoneNumberPtr)
+	}
+	return sent
+}
+
+// Initialize a session that the SDK will use to load
+// credentials from the shared credentials file. (~/.aws/credentials).
 var sess = session.Must(session.NewSessionWithOptions(session.Options{
 	SharedConfigState: session.SharedConfigEnable,
 }))
@@ -158,11 +183,14 @@ var svc = sns.New(sess)
 
 func main() {
 
-	fmt.Println(strings.HasPrefix("+34312", "+33"))
+	port := ":8010"
+
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/messages", createMessage).Methods("POST")
 	router.HandleFunc("/messages", getMessages).Methods("GET")
 	router.HandleFunc("/", homeLink).Methods("GET")
-	log.Fatal(http.ListenAndServe(":8010", router))
+
+	fmt.Printf("Starting the server on localhost%s (cloud enabled: %t)", port, allowCloud)
+	log.Fatal(http.ListenAndServe(port, router))
 
 }

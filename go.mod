@@ -13,6 +13,7 @@ require (
 	github.com/fsnotify/fsnotify v1.5.4 // indirect
 	github.com/gorilla/mux v1.8.0 // indirect
 	github.com/imdario/mergo v0.3.13 // indirect
+	github.com/jacobsa/go-serial v0.0.0-20180131005756-15cf729a72d4 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
